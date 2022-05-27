@@ -410,12 +410,12 @@ def finnal_function(my_data):
     #     t3new
     fin_data = t3new.groupby(['FG1' , 'country','date' ,'marker' ,  'markerConsultants']).count().reset_index()
     name_country = fin_data.country[5]
-    path = '//faberlic.ru//ru//Департаменты//Отдел планирования//Analitik//Группа аналитики//Отчетность//33_Галимуллин//Анализ изменения цен//data_country//'    
+    path = '//.../Анализ изменения цен//data_country//'    
     fin_data.to_excel(path + name_country + '.xlsx')
 
     return fin_data
 
-# path = '//faberlic.ru//ru//Департаменты//Отдел планирования//Analitik//Группа аналитики//Отчетность//33_Галимуллин//Анализ изменения цен//'    
+# path = '//..//33_Галимуллин//Анализ изменения цен//'    
 # fin_data.to_excel(path + '/name_country.xlsx')
 fin_data = finnal_function(my_data)
 fin_data.head() 
