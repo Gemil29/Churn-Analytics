@@ -397,7 +397,7 @@ my_data.head()
 #Финальная аналитика - сведение всех данных
 
 def finnal_function(my_data):
-
+    new_col_1 = my_data.columns[3:]
     t1new = pd.melt(my_data, id_vars=['Consultant_id','FG1','country'], value_vars=new_col_1)
     t1new['date'] = t1new['variable'].apply(lambda x:  x[:15])
     t1new['data'] = t1new['variable'].apply(lambda x:  x[16:])
