@@ -1,0 +1,422 @@
+import pandas as pd
+import numpy as np
+import pyodbc
+import warnings
+warnings.simplefilter('ignore')
+
+def load_data():
+    cnxn = pyodbc.connect( "Driver={SQL Server Native Client 11.0};"
+                          "Server=DWHtest;"
+                           "Database=Faberlic_DWH;"
+                           "Trusted_Connection=yes;"  )
+    
+    
+#     if sql  == '0':
+    sql = f'''              
+			SELECT		oi.Consultant_id			
+			, ds.CountryDP as country
+			, dg.FG0
+			, dg.FG1
+			, dg.FG2
+			, dg.FG3
+			, dd.PeriodName2
+			, SUM(oi.GoodsCount - isnull(ret.RETURNNCOUNT , 0)) AS opQty
+			, sum((oi.GoodsCount - isnull(ret.RETURNNCOUNT , 0)) * oi.GoodsPricePerOne / c.CorpRate) as opRub	
+
+
+FROM [dwh].[OrderItem] as oi
+
+	INNER JOIN [dmt].[DimGoods] as dg on oi.Goods_id = dg.Goods_id
+	INNER JOIN [dmt].[DimDate] as dd on oi.OrderApprovedDate = dd.Date_
+	INNER JOIN [dmt].[DimStore] as ds on oi.Store_id = ds.Store_id
+	LEFT JOIN 
+		( SELECT cod.OrderItem_id, 
+				  sum (cod.GoodsCount) as RETURNNCOUNT -- перетензии одобренные
+		  FROM dwh.ClaimOrderDetail as cod	
+		  WHERE ActionRefValue_id = 206793 -- код одобренной претензии 
+		  GROUP BY cod.OrderItem_id
+		  ) as Ret on  oi.OrderItem_id = Ret.OrderItem_id
+	LEFT JOIN dwh.CurrencyRateEachDay as c on c.Currency = oi.Currency_id and c.Date = oi.OrderApprovedDate
+	LEFT JOIN dmt.DimPromo as pr on oi.Promo_id = pr.Promo_id
+	 /*LEFT JOIN dmt.DimPromo as pr on (select promo_id from dmt.DimPromo as pr
+										where pr.RefValueCode like N'%exclusive%'
+										or pr.RefValueCode like N'%step[_]1%'
+										 ) as pr on oi.Promo_id = pr.Promo_id*/
+
+WHERE	dd.PeriodYear >= 2021
+	--and dd.PeriodNumberInYear in (4,5)
+	and	ds.CountryDP = N'Беларусь'
+	and oi.OrderType_id not in (select DocumentType_id from dwh.DocumentType where TypeCode in (N'RETURN', N'RETURN_FUTURE', N'PROMO_POOL' ))  -- возвраты
+	and oi.OrderState_id not in (select State_id from dwh.Status where StateName = N'ORDER_RETURNED')
+	--and (pr.RefValueCode not like N'%exclusive%' or pr.RefValueCode not like N'%step[_]1%' )
+	
+
+
+
+GROUP BY    oi.Consultant_id			
+			, ds.CountryDP 
+			, dg.FG0
+			, dg.FG1
+			, dg.FG2
+			, dg.FG3
+			, dd.PeriodName2'''
+    df = pd.read_sql(sql, cnxn)
+    # print(df1.head())
+    cnxn.close()
+
+    return df
+        
+# df = load_data(sql) 
+
+
+# Сводная таблица по ФГ1
+def pivot_df(df):
+    data = df.pivot_table( index = ['Consultant_id', 'FG1'],
+                    columns = 'PeriodName2',
+                    aggfunc = {'opQty':np.count_nonzero }
+                    ).reset_index().fillna(0)
+    last_col = list(data.columns)
+    new_col = []
+    for i in last_col: #Переименование сводной таблицы (мульти индекс)
+        if i[1] == '':
+            new_col.append(i[0])
+
+        else:
+             new_col.append(i[1])
+    data.columns = new_col
+    return data
+
+d2 = pivot_df(df)
+pivot_data = d2.copy()
+pivot_data.head()
+
+# Определение долей покупок из 7 и 3 периодов с 2021_01-2021-08
+def proportion_of_consultants(d2):
+    fin_ = len(d2.columns[2:]) - 7  
+    #Диапазон (доля покупок в периодах из 7 анализируемых) для выборки периодов с 2021_01-2022_01 (-7)  (СчётЕсли <> 0)/7
+    for j in range( fin_):
+        col_name = d2.columns[2+j] +'-' + d2.columns[2+j+6]
+    #     print(col_name)    
+        d2[col_name] = d2.iloc[:, j+2 : j+8].astype(bool).sum( axis = 1) / d2.iloc[:, j+2 : j+8].count(axis = 1)
+#     d2.head(3)    
+    # Диапазон для определения кол-ва периодов покупок из последних 3-х (СчётЕсли <> 0)/3
+    for i in range(1, fin_- 1):
+        col_name2 = d2.columns[i+8] +"-" + d2.columns[i+8 +2] # +3 периода
+    #     print(col_name2)
+        d2[col_name2] = d2.iloc[: , i+8 : i+11].astype(bool).sum( axis = 1) / d2.iloc[: , i+8 : i+11].count( axis = 1) 
+    
+    return d2
+
+data_cons = proportion_of_consultants(d2)
+data_cons.head()    
+
+# Определение средней доли в ФГ1
+def mean_fg1(df, pivot_data):
+# Количество покупок по ФГ1 
+    pivot_fg1 = pivot_data.pivot_table( index = ['FG1'], 
+                           aggfunc = np.count_nonzero 
+                        ).fillna(0)
+
+    pivot_fg1 = pivot_fg1.drop('Consultant_id', axis = 1)
+    
+# Количество консультантов, совершивших покупки
+    pivot_consultants = df.pivot_table(index = ['Consultant_id'],
+                                   columns = ['PeriodName2'],
+                                  aggfunc = { 'opQty': np.count_nonzero }
+                                  ).fillna(0)
+    pivot_consultants.columns
+    list_columns = list(pivot_consultants.columns)
+    list_columns_new = []
+    for k in list_columns:  
+        list_columns_new.append(k[1])
+
+    pivot_consultants.columns = list_columns_new
+    # Количество кон-в Тотал
+    TotalCountConsultants = pd.DataFrame(pivot_consultants.astype(bool).sum(axis=0), columns = ['TotalCountConsultants']).T 
+#     TotalCountConsultants
+    fg1 = pd.concat([pivot_fg1, TotalCountConsultants], axis = 0)
+#     Столбцы с долей по ФГ1
+    for i in range(len(fg1.columns)):
+        new_columns_fg1 = fg1.columns[i:i+1] + '-proportion'
+    #     print(new_columns_fg1)
+        fg1[new_columns_fg1] = fg1.iloc[:, i : i+1] / fg1.iloc[-1, i:i+1]
+    first_new_columns = fg1.columns.get_loc('2021_01-proportion')
+    last_new_colmns = len(fg1.iloc[:,first_new_columns:].columns)
+    print(first_new_columns)
+#     Определение динамичной средней доли по ФГ 1 с 1-7 период и т.д
+    for m in range(last_new_colmns - 6):
+        prep_mean = fg1.columns[m] +"-"+ fg1.columns[m+6] + "_means"
+    #     print(prep_mean)
+        fg1[prep_mean] = fg1.iloc[:,  m + first_new_columns : m + first_new_columns + 6 ].mean(axis = 1)
+    for_slice = fg1.columns.get_loc('2021_01-2021_07_means')  #Если будет ошибка при воспроизведении функции (Останутся дополнительные столбцы без приставки means)-> убрать коммент
+    means_fg1 = fg1.iloc[:,for_slice:] #
+    return means_fg1   
+
+means_fg1 = mean_fg1(df,pivot_data)
+means_fg1.head(8)
+
+# pivot_df_ = d2.copy()
+def merges_functions(pivot_data,data_cons,means_fg1):
+    for_del = list(pivot_data.columns[2:])
+    prepData = data_cons.drop(for_del, axis = 1) 
+    means_fg1 = means_fg1.reset_index()
+    means_fg1 = means_fg1.rename(columns = {'index': 'FG1'})
+    prepData_merge = prepData.merge(means_fg1, how = 'left' , on = 'FG1').fillna('alarm!')
+#   Поиск столбцов для определения постоянных консультантов
+    first_columns_mean_3periods = prepData_merge.columns.get_loc('2022_01-2022_07') + 1
+    col1 = prepData_merge.iloc[:,2:first_columns_mean_3periods].columns 
+    first_columns_mean_fg = prepData_merge.columns.get_loc('2021_01-2021_07_means')
+    col2 = prepData_merge.iloc[:, first_columns_mean_fg:-1].columns
+#    Цикл для метки 
+    for i in range(len(col1)):
+        col11 = col1[i]
+        col22 = col2[i]
+        prepData_merge[f'{col11}_const_consultant'] = (prepData_merge[col11] > prepData_merge[col22]).astype(int)
+    
+    slice_ = list( prepData_merge.iloc[:,prepData_merge.columns.get_loc('2021_01-2021_07_const_consultant') :].columns )
+    prepData_merge['constant_consultant'] = prepData_merge[slice_].sum(axis = 1).apply(lambda x: 1 if x > 0 else 0)
+    prepData_merge = prepData_merge[prepData_merge['constant_consultant'] == 1]
+    
+    # Поиск столбцов для маркеровки
+    cc = prepData_merge.columns.get_loc('2021_08-2021_10') #номер столбца с периодами 8-10
+    mf = prepData_merge.columns.get_loc('2021_01-2021_07_means')
+    mar_cc = prepData_merge.columns.get_loc('2021_01-2021_07_const_consultant')
+    delta = mf - cc         
+    #Наименование новых столбцов
+    name_columns = prepData_merge.iloc[:, cc:mf].columns + "_markerConsultants"
+
+    f1_columns = prepData_merge.iloc[:,cc:mf].columns #столбцы "вне выборки"
+    f2_columns = prepData_merge.iloc[:,mar_cc:-3].columns # const / abandoned
+    print("check test", len(f1_columns), "=", len(f2_columns), " (if != --> Alarm!)")
+
+    for i in range(delta):
+        f1 = f1_columns[i]
+        f2 = f2_columns[i]
+        print(f2 , " --> ", f1)
+        prepData_merge[name_columns] = np.where(prepData_merge[f2_columns] == 0, 'is not', np.where( prepData_merge[f1_columns] != 0 , 'consultant_constant', 'abandoned' ) )
+
+    my_columns = list(name_columns)
+    my_columns.insert(0,'Consultant_id')
+    my_columns.insert(1,'FG1' )    
+    fin_data = prepData_merge[my_columns]
+    fin_data
+    
+    return fin_data
+
+master_data = merges_functions(pivot_data,data_cons,means_fg1)    
+master_data.head()
+
+# Сегментация консультантов по их среднему чеку
+def segmentation_function(df):
+    segment = df.pivot_table(   index = ['Consultant_id', 'country'],
+                                columns = 'PeriodName2',
+                                aggfunc = { 'opRub': np.sum } 
+                            ).reset_index().fillna(0)
+    
+    last_col = list(segment.columns)
+    new_col = []
+    for i in last_col: #Переименование сводной таблицы (мульти индекс)
+        if i[1] == '':
+            new_col.append(i[0])
+
+        else:
+             new_col.append(i[1])
+    segment.columns = new_col
+#     Опеределение статистических характеристик, средних продаж в динамике по 3 месяцам.  
+    
+    len_col =  len(list(segment.iloc[:,2:-1].columns))
+    print("All Periods - ",len_col)
+    c1 = segment.iloc[:,2:-1].columns[0]
+    c7 = segment.iloc[:,2:-1].columns[6]
+    segment['avgPurchSum'] = segment.iloc[:, 2:].sum(axis = 1) / segment.iloc[:, 2:].astype(bool).sum(axis = 1)
+    # print("avgPurchSum = ", round(avgPurchSum,0)) 
+    decsribes =  segment.iloc[:, -1].describe()
+#    Значения статистических хар-к 
+    lower1500 = 1500 
+    avgPurchSum = segment['avgPurchSum'].mean()
+    above_average = decsribes[-2] #quartile3
+    loyal_client = avgPurchSum*2  
+    find_col = segment.columns.get_loc('avgPurchSum') + 1  
+
+    for i in range(len_col-6):
+        new_c = segment.iloc[:,2:].columns[i] + "-" + segment.iloc[:,2:].columns[i+6] + " avg_check" 
+#         print(i," - ",new_c)
+#         Динамика среднего чека
+        segment[new_c] =  segment.iloc[:, i+2 : i+8].sum( axis = 1) / 7 
+    
+# #     Маркировка консультантов
+#     for i in range(len_col - 6):
+#         avg_check_marker = segment.iloc[:,2:].columns[i] + "-" + segment.iloc[:,2:].columns[i+6] + " marker" 
+#         print(avg_check_marker)
+#         segment[avg_check_marker] = np.where( segment[segment.columns[find_col + i]] == 0, "" , 
+#                                           np.where( segment[segment.columns[find_col + i]] < lower1500 , "Less_than_1500" , 
+#                                           np.where( segment[segment.columns[find_col + i]] < avgPurchSum, "Below_average" , 
+#                                           np.where(segment[segment.columns[find_col + i]] < avgPurchSum , "Above_average",
+#                                           np.where(segment[segment.columns[find_col + i]] < loyal_client, "Loyal_client"  , "Top_Client"
+#                                                   )
+#                                                   )
+#                                                   )
+#                                                   )
+#                                        )  
+    
+
+    for i in range(len_col - 8):
+        avg_check_marker = segment.iloc[:,2:].columns[i+7] + "-" + segment.iloc[:,2:].columns[i+9] + " marker" 
+        print(avg_check_marker)
+        segment[avg_check_marker] = np.where( segment[segment.columns[find_col + i]] == 0, "" , 
+                                          np.where( segment[segment.columns[find_col + i]] < lower1500 , "Less_than_1500" , 
+                                          np.where( segment[segment.columns[find_col + i]] < avgPurchSum, "Below_average" , 
+                                          np.where(segment[segment.columns[find_col + i]] < avgPurchSum , "Above_average",
+                                          np.where(segment[segment.columns[find_col + i]] < loyal_client, "Loyal_client"  , "Top_Client"
+                                                  )
+                                                  )
+                                                  )
+                                                  )
+                                       )  
+        
+#     Выделение необходимого диапазона
+    markers = list(segment.iloc[:,-(len_col - 8):].columns)
+    markers.insert(0,"Consultant_id")
+    markers.insert(1,'country')
+    segment_clients  = segment[markers]
+    
+    
+    return segment_clients
+    
+segment = segmentation_function(df)
+segment.head()    
+    
+# Определение ушедших консультантов
+def status_consultants(df):
+    status = df.pivot_table(   index = ['Consultant_id', 'country'],
+                                columns = 'PeriodName2',
+                                aggfunc = { 'opRub': np.sum } 
+                            ).reset_index().fillna(0)
+    
+    last_col = list(status.columns)
+    new_col = []
+    for i in last_col: #Переименование сводной таблицы (мульти индекс)
+        if i[1] == '':
+            new_col.append(i[0])
+
+        else:
+             new_col.append(i[1])
+    status.columns = new_col
+    
+    col_number = status.columns.get_loc('2021_07') + 1
+    lens = len(status.iloc[: , col_number:].columns)
+
+    for i in range(lens-2):
+        new_columns = status.iloc[:,col_number:].columns[i] + "-" +   status.iloc[:,2+col_number:].columns[i] + " status_cons"
+#         print(i, "-" , new_columns)
+        status[new_columns] = np.where( status.iloc[:, i + col_number : i + col_number+2].sum(axis = 1) == 0 , "Gone_completely" , "Remained")
+    
+    
+#     print("position #slice:" , status.columns.get_loc('2021_08-2021_10 status_cons'))
+    list_columns_status = list( status.iloc[:, status.columns.get_loc('2021_08-2021_10 status_cons') :].columns )
+  
+    list_columns_status.insert(0,'Consultant_id')
+
+#     list_columns_status.insert(1,'country')
+#     print(list_columns_status)
+    
+    status_consultant = status[list_columns_status]
+    
+    return status_consultant
+
+status_cons = status_consultants(df)
+status_cons.head()
+
+# Изменение средней цены в периодах 3 к 3
+def average_price_change(df):
+    prices = df.pivot_table(   index = ['FG1'],
+                                columns = 'PeriodName2',
+                                aggfunc = { 'opRub' : np.sum ,
+                                           'opQty' : np.sum ,
+                                          } 
+                            ).reset_index().fillna(0)
+    
+    last_col = list(prices.columns)
+    new_col = []
+    for i in last_col: #Переименование сводной таблицы (мульти индекс)
+        if i[1] == '':
+            new_col.append(i[0])
+
+        else:
+             new_col.append(i[1])
+    prices.columns = new_col
+
+    len_col = len(df.PeriodName2.unique())
+    prices.columns[1+len_col :]
+    for i in range(len_col):
+        name_col = prices.columns[i+1] + "_AVG-prices"  #+ price.columns[i+1 + len_col] 
+#         print(name_col)
+        prices[name_col] = prices.iloc[:,i+1 + len_col] /  prices.iloc[:,i+1]
+    
+#     Определяем изменение средней цены 3 периодов к 3 периодам пердыдущим
+    uy = prices.columns.get_loc('2021_08_AVG-prices')
+    for j in range(len_col-9):
+        name_col = prices.columns[j+8] +"-" + prices.columns[j+10]  + "_dinamicPrice" 
+    #     print(j," ",name_col )
+        prices[name_col] =  prices.iloc[:, j + uy : j + 3+uy].mean(axis = 1)  / prices.iloc[:, j+ (uy - 3) : j+ uy].mean(axis = 1) 
+
+    first_dimac_price_column = prices.columns.get_loc('2021_08-2021_10_dinamicPrice')
+    slice_fdpc =  list(prices.iloc[:,first_dimac_price_column:].columns)
+
+    slice_fdpc.insert(0,'FG1')
+    prices = prices[slice_fdpc].fillna(0)
+        
+
+    
+    return prices
+price = average_price_change(df)
+price.head()    
+
+# markerConsultants = merges_functions(pivot_data,data_cons,means_fg1)
+# stat_cons = status_consultants(df)
+# segment_avg_chek = segmentation_function(df)
+
+def all_data( ): #markerConsultants, stat_cons , segment_avg_chek
+    markerConsultants = merges_functions(pivot_data,data_cons,means_fg1)
+    stat_cons = status_consultants(df)
+    segment_avg_chek = segmentation_function(df)
+    prepData = markerConsultants.merge(stat_cons, how = 'left' , on = 'Consultant_id').fillna('!Error!')
+    data_all = prepData.merge(segment_avg_chek , how = 'left' , on = 'Consultant_id').fillna('!Error!')  
+    fird_column = data_all.pop('country')
+    data_all.insert(2, 'country', fird_column)
+
+        
+    return data_all
+    
+
+my_data = all_data( )
+my_data.head()
+  
+
+
+#Финальная аналитика - сведение всех данных
+
+def finnal_function(my_data):
+
+    t1new = pd.melt(my_data, id_vars=['Consultant_id','FG1','country'], value_vars=new_col_1)
+    t1new['date'] = t1new['variable'].apply(lambda x:  x[:15])
+    t1new['data'] = t1new['variable'].apply(lambda x:  x[16:])
+    # t1new
+    t2new = t1new.pivot(index=['Consultant_id','FG1','country','date'], columns = ['data'],values='value').reset_index()
+    # t2new
+    t3new = t2new[(t2new['markerConsultants'] != 'is not')].copy()
+    t3new['markerConsultants'][t3new['status_cons'] == 'Gone_completely'] = 'Gone_completely'
+    t3new = t3new.drop('status_cons',axis = 1)
+    #     t3new
+    fin_data = t3new.groupby(['FG1' , 'country','date' ,'marker' ,  'markerConsultants']).count().reset_index()
+    name_country = fin_data.country[5]
+    path = '//faberlic.ru//ru//Департаменты//Отдел планирования//Analitik//Группа аналитики//Отчетность//33_Галимуллин//Анализ изменения цен//data_country//'    
+    fin_data.to_excel(path + name_country + '.xlsx')
+
+    return fin_data
+
+# path = '//faberlic.ru//ru//Департаменты//Отдел планирования//Analitik//Группа аналитики//Отчетность//33_Галимуллин//Анализ изменения цен//'    
+# fin_data.to_excel(path + '/name_country.xlsx')
+fin_data = finnal_function(my_data)
+fin_data.head() 
+
