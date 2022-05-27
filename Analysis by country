@@ -7,7 +7,7 @@ warnings.simplefilter('ignore')
 def load_data():
     cnxn = pyodbc.connect( "Driver={SQL Server Native Client 11.0};"
                           "Server=DWHtest;"
-                           "Database=Faberlic_DWH;"
+                           "Database=F***_DWH;"
                            "Trusted_Connection=yes;"  )
     
     
